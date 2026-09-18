@@ -164,8 +164,10 @@ Important behavior:
   multiline matching.
 - Uses argument-array process spawning instead of shell interpolation.
 - Honors Pi's abort signal.
-- Truncates output with Pi's built-in limits and saves the full result to a
-  temporary file if needed.
+- Caps captured output at 8 MiB per search path, 16 MiB per tool call, and
+  20,000 lines. Larger searches stop with a warning so the query can be narrowed.
+- Applies Pi's built-in visible-output truncation and saves the full captured
+  result to a temporary file when that visible limit is reached.
 
 ### Agent-oriented examples
 

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { access, mkdir, mkdtemp, readdir, realpath, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_MAX_BYTES,
@@ -129,6 +130,7 @@ interface ProcessResult {
   stdout: string;
   stderr: string;
   exitCode: number | null;
+  capturedBytes: number;
 }
 
 interface TgrepDetails {
@@ -149,9 +151,23 @@ interface TgrepDetails {
 }
 
 const MAX_CAPTURE_BYTES = 100 * 1024 * 1024;
+const MAX_SEARCH_JOB_CAPTURE_BYTES = 8 * 1024 * 1024;
+const MAX_TOTAL_SEARCH_CAPTURE_BYTES = 16 * 1024 * 1024;
+const MAX_TOTAL_SEARCH_LINES = 20_000;
+const MAX_WARNING_COUNT = 100;
+const MAX_WARNING_CHARS = 4_000;
 const SERVER_START_WAIT_MS = 1500;
 const SERVER_STATUS_TIMEOUT_MS = 800;
 const MAX_AUTO_SERVERS_PER_SEARCH = 10;
+
+class ProcessOutputLimitError extends Error {
+  constructor(command: string, maxCaptureBytes: number) {
+    super(
+      `${command} output exceeded the ${formatSize(maxCaptureBytes)} capture limit; narrow the query.`,
+    );
+    this.name = "ProcessOutputLimitError";
+  }
+}
 
 function normalizeForCompare(path: string): string {
   const normalized = resolve(path);
@@ -162,13 +178,16 @@ function isPathInside(parent: string, child: string): boolean {
   const parentKey = normalizeForCompare(parent);
   const childKey = normalizeForCompare(child);
   const rel = relative(parentKey, childKey);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  return (
+    rel === "" ||
+    (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+  );
 }
 
-function isDangerousRoot(path: string): boolean {
+function isDangerousRoot(path: string, homePath: string): boolean {
   const resolved = resolve(path);
   if (dirname(resolved) === resolved) return true;
-  return normalizeForCompare(resolved) === normalizeForCompare(homedir());
+  return normalizeForCompare(resolved) === normalizeForCompare(homePath);
 }
 
 function repoIndexName(root: string): string {
@@ -216,15 +235,20 @@ async function runProcess(
 
     const maxCapture = options.maxCaptureBytes ?? MAX_CAPTURE_BYTES;
 
-    const append = (current: string, chunk: Buffer): string => {
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+
+    const append = (
+      current: string,
+      chunk: Buffer,
+      decoder: StringDecoder,
+    ): string => {
       capturedBytes += chunk.length;
       if (capturedBytes > maxCapture) {
         child.kill();
-        throw new Error(
-          `${command} output exceeded the ${formatSize(maxCapture)} capture limit; narrow the query.`,
-        );
+        throw new ProcessOutputLimitError(command, maxCapture);
       }
-      return current + chunk.toString("utf8");
+      return current + decoder.write(chunk);
     };
 
     const timer = options.timeoutMs
@@ -243,7 +267,7 @@ async function runProcess(
 
     child.stdout.on("data", (chunk: Buffer) => {
       try {
-        stdout = append(stdout, chunk);
+        stdout = append(stdout, chunk, stdoutDecoder);
       } catch (error) {
         finish(() => rejectPromise(error));
       }
@@ -251,7 +275,7 @@ async function runProcess(
 
     child.stderr.on("data", (chunk: Buffer) => {
       try {
-        stderr = append(stderr, chunk);
+        stderr = append(stderr, chunk, stderrDecoder);
       } catch (error) {
         finish(() => rejectPromise(error));
       }
@@ -277,11 +301,13 @@ async function runProcess(
 
     child.on("close", (exitCode) => {
       finish(() => {
+        stdout += stdoutDecoder.end();
+        stderr += stderrDecoder.end();
         if (timedOut) {
           rejectPromise(new Error(`${command} timed out after ${options.timeoutMs}ms`));
           return;
         }
-        resolvePromise({ stdout, stderr, exitCode });
+        resolvePromise({ stdout, stderr, exitCode, capturedBytes });
       });
     });
   });
@@ -304,10 +330,16 @@ async function gitRoot(cwd: string): Promise<string | undefined> {
 
 async function discoverScope(cwd: string): Promise<DiscoveryState> {
   const launchRoot = await realpath(cwd);
+  let homeRoot: string;
+  try {
+    homeRoot = await realpath(homedir());
+  } catch {
+    homeRoot = resolve(homedir());
+  }
 
   // The filesystem root and the user's home directory are intentionally never
   // auto-indexed, even if they happen to contain Git repositories.
-  if (isDangerousRoot(launchRoot)) {
+  if (isDangerousRoot(launchRoot, homeRoot)) {
     return {
       launchRoot,
       searchBoundary: launchRoot,
@@ -318,7 +350,7 @@ async function discoverScope(cwd: string): Promise<DiscoveryState> {
   }
 
   const containingRepo = await gitRoot(launchRoot);
-  if (containingRepo && !isDangerousRoot(containingRepo)) {
+  if (containingRepo && !isDangerousRoot(containingRepo, homeRoot)) {
     return {
       launchRoot,
       searchBoundary: containingRepo,
@@ -346,7 +378,7 @@ async function discoverScope(cwd: string): Promise<DiscoveryState> {
     const childRoot = await gitRoot(child);
     if (!childRoot) continue;
     if (normalizeForCompare(childRoot) !== normalizeForCompare(child)) continue;
-    if (isDangerousRoot(childRoot)) continue;
+    if (isDangerousRoot(childRoot, homeRoot)) continue;
 
     repos.push({
       root: childRoot,
@@ -423,11 +455,21 @@ async function buildSearchJobs(
       }));
     }
 
+    if (state.mode === "repository") {
+      const repo = state.repos[0];
+      return [
+        {
+          path: repo ? displayPath(state, repo.root) : ".",
+          repo,
+          label: repo?.name ?? ".",
+        },
+      ];
+    }
+
     return [
       {
         path: ".",
-        repo: state.mode === "repository" ? state.repos[0] : undefined,
-        label: state.mode === "repository" ? state.repos[0]?.name ?? "." : ".",
+        label: ".",
       },
     ];
   }
@@ -478,7 +520,15 @@ async function serverRunning(repo: RepoTarget): Promise<boolean> {
         maxCaptureBytes: 256 * 1024,
       },
     );
-    return result.exitCode === 0;
+    if (result.exitCode !== 0) return false;
+
+    // `tgrep status` exits successfully when it reports that the server is not
+    // running (and also when no index exists). Current tgrep prints a PID when
+    // the server is active; older builds may print an explicit `Server: running`
+    // line. Only one of those positive states is enough to trust the index.
+    if (/^\s*Server\s*:\s*not\s+running\b/im.test(result.stdout)) return false;
+    if (/^\s*Server\s*:\s*running\b/im.test(result.stdout)) return true;
+    return /^\s*PID\s*:\s*\d+\s*$/im.test(result.stdout);
   } catch (error) {
     if (error instanceof Error && error.message.includes("not found on PATH")) {
       throw error;
@@ -490,19 +540,28 @@ async function serverRunning(repo: RepoTarget): Promise<boolean> {
 async function ensureServer(repo: RepoTarget): Promise<boolean> {
   if (await serverRunning(repo)) return true;
 
-  await mkdir(repo.indexPath, { recursive: true });
+  try {
+    await mkdir(repo.indexPath, { recursive: true });
+  } catch {
+    return false;
+  }
 
-  const child = spawn(
-    "tgrep",
-    ["serve", repo.root, "--index-path", repo.indexPath],
-    {
-      cwd: repo.root,
-      detached: true,
-      shell: false,
-      windowsHide: true,
-      stdio: "ignore",
-    },
-  );
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(
+      "tgrep",
+      ["serve", repo.root, "--index-path", repo.indexPath],
+      {
+        cwd: repo.root,
+        detached: true,
+        shell: false,
+        windowsHide: true,
+        stdio: "ignore",
+      },
+    );
+  } catch {
+    return false;
+  }
   child.once("error", () => {});
   child.unref();
 
@@ -520,10 +579,6 @@ function buildSearchArgs(
   job: SearchJob,
   useIndex: boolean,
 ): string[] {
-  if (params.filesOnly && params.count) {
-    throw new Error("filesOnly and count are mutually exclusive");
-  }
-
   const args: string[] = ["--color", "never"];
 
   if (job.repo) {
@@ -574,6 +629,48 @@ function formatJobOutput(job: SearchJob, output: string, multiJob: boolean): str
   return `### ${job.label}\n${output.trimEnd()}`;
 }
 
+function countLines(text: string): number {
+  if (text.length === 0) return 0;
+  let lines = 1;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10) lines++;
+  }
+  return text.endsWith("\n") ? lines - 1 : lines;
+}
+
+function countNonEmptyLines(text: string): number {
+  let count = 0;
+  let lineStart = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) !== 10) continue;
+    if (i > lineStart) count++;
+    lineStart = i + 1;
+  }
+  if (lineStart < text.length) count++;
+  return count;
+}
+
+function takeFirstLines(text: string, maxLines: number): string {
+  if (maxLines <= 0) return "";
+  let lines = 1;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) !== 10) continue;
+    if (lines === maxLines) return text.slice(0, i);
+    lines++;
+  }
+  return text;
+}
+
+function compactWarning(warning: string): string {
+  const compact = warning.replace(/\s+/g, " ").trim();
+  if (compact.length <= MAX_WARNING_CHARS) return compact;
+
+  let end = MAX_WARNING_CHARS;
+  const lastChar = compact.charCodeAt(end - 1);
+  if (lastChar >= 0xd800 && lastChar <= 0xdbff) end--;
+  return `${compact.slice(0, end)}… [warning truncated]`;
+}
+
 export default function tgrepExtension(pi: ExtensionAPI) {
   let discoveryPromise: Promise<DiscoveryState> | undefined;
 
@@ -595,42 +692,94 @@ export default function tgrepExtension(pi: ExtensionAPI) {
       `Auto-indexing is limited to a Git repository containing the Pi launch directory, or Git repositories exactly one directory below the launch directory. ` +
       `Home/filesystem roots and all other directories are scan-only. Servers start lazily on the first indexed search. ` +
       `Prefer fixed=true for symbols/exact strings and filesOnly=true for broad discovery. ` +
-      `Use freshness=current after very recent edits. Output is truncated to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
+      `Use freshness=current after very recent edits. Search capture is capped at ${formatSize(MAX_SEARCH_JOB_CAPTURE_BYTES)} per path, ${formatSize(MAX_TOTAL_SEARCH_CAPTURE_BYTES)} per call, and ${MAX_TOTAL_SEARCH_LINES.toLocaleString()} lines. Displayed output is truncated to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
     parameters: TgrepParams,
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      if (params.filesOnly && params.count) {
+        throw new Error("filesOnly and count are mutually exclusive");
+      }
+
       const state = await getState(ctx.cwd);
       const jobs = await buildSearchJobs(state, params.paths);
       const warnings: string[] = [];
+      let omittedWarningCount = 0;
+      const addWarning = (warning: string) => {
+        if (warnings.length >= MAX_WARNING_COUNT) {
+          omittedWarningCount++;
+          return;
+        }
+        warnings.push(compactWarning(warning));
+      };
+      const visibleWarnings = () =>
+        omittedWarningCount > 0
+          ? [...warnings, `${omittedWarningCount} additional warnings omitted.`]
+          : warnings;
       const outputs: string[] = [];
       const jobDetails: TgrepDetails["jobs"] = [];
       let matchedLines = 0;
+      let capturedBytes = 0;
+      let outputBytes = 0;
+      let outputLines = 0;
+      let outputLimitReached = false;
 
       const indexedJobs = jobs.filter((job) => job.repo).length;
       const allowAutoServers = indexedJobs <= MAX_AUTO_SERVERS_PER_SEARCH;
       if (!allowAutoServers && indexedJobs > 0 && params.freshness !== "current") {
-        warnings.push(
+        addWarning(
           `Search spans ${indexedJobs} repositories; automatic server startup is capped at ${MAX_AUTO_SERVERS_PER_SEARCH}, so this query used filesystem scans instead. Narrow paths to enable lazy indexing for a specific repository.`,
         );
       }
 
       for (const job of jobs) {
+        const remainingCaptureBytes =
+          MAX_TOTAL_SEARCH_CAPTURE_BYTES - capturedBytes;
+        if (remainingCaptureBytes <= 0) {
+          outputLimitReached = true;
+          addWarning(
+            `Search reached the ${formatSize(MAX_TOTAL_SEARCH_CAPTURE_BYTES)} total capture limit; remaining paths were skipped. Narrow the query or search fewer paths.`,
+          );
+          break;
+        }
+
         let useIndex = false;
 
         if (job.repo && params.freshness !== "current" && allowAutoServers) {
           useIndex = await ensureServer(job.repo);
           if (!useIndex) {
-            warnings.push(
+            addWarning(
               `${job.label}: tgrep server was not ready; used --no-index to avoid a stale on-disk index.`,
             );
           }
         }
 
         const args = buildSearchArgs(params, job, useIndex);
-        const result = await runProcess("tgrep", args, {
-          cwd: state.launchRoot,
-          signal,
-        });
+        let result: ProcessResult;
+        try {
+          result = await runProcess("tgrep", args, {
+            cwd: state.launchRoot,
+            signal,
+            maxCaptureBytes: Math.min(
+              MAX_SEARCH_JOB_CAPTURE_BYTES,
+              remainingCaptureBytes,
+            ),
+          });
+        } catch (error) {
+          if (!(error instanceof ProcessOutputLimitError)) throw error;
+
+          jobDetails.push({
+            path: job.path,
+            repository: job.repo?.root,
+            indexed: useIndex,
+            exitCode: null,
+          });
+          outputLimitReached = true;
+          addWarning(
+            `${job.label}: ${error.message} Search stopped here; remaining paths were skipped.`,
+          );
+          break;
+        }
+        capturedBytes += result.capturedBytes;
 
         jobDetails.push({
           path: job.path,
@@ -640,14 +789,57 @@ export default function tgrepExtension(pi: ExtensionAPI) {
         });
 
         if (result.stderr.trim()) {
-          warnings.push(`${job.label}: ${result.stderr.trim()}`);
+          addWarning(`${job.label}: ${result.stderr}`);
         }
 
         if (result.exitCode === 0) {
           const text = result.stdout.trimEnd();
           if (text) {
-            outputs.push(formatJobOutput(job, text, jobs.length > 1));
-            matchedLines += text.split("\n").filter(Boolean).length;
+            const formatted = formatJobOutput(job, text, jobs.length > 1);
+            const separatorBytes = outputs.length ? 2 : 0;
+            const separatorLines = outputs.length ? 2 : 0;
+            const remainingOutputBytes =
+              MAX_TOTAL_SEARCH_CAPTURE_BYTES - outputBytes - separatorBytes;
+            const remainingOutputLines =
+              MAX_TOTAL_SEARCH_LINES - outputLines - separatorLines;
+            const formattedBytes = Buffer.byteLength(formatted, "utf8");
+            const formattedLines = countLines(formatted);
+
+            if (formattedBytes > remainingOutputBytes) {
+              outputLimitReached = true;
+              addWarning(
+                `Search reached the ${formatSize(MAX_TOTAL_SEARCH_CAPTURE_BYTES)} total output limit; this and remaining results were omitted. Narrow the query or search fewer paths.`,
+              );
+              break;
+            }
+
+            if (formattedLines > remainingOutputLines) {
+              const keptFormatted = takeFirstLines(
+                formatted,
+                remainingOutputLines,
+              );
+              if (keptFormatted) {
+                outputs.push(keptFormatted);
+                outputBytes +=
+                  separatorBytes + Buffer.byteLength(keptFormatted, "utf8");
+                outputLines += separatorLines + countLines(keptFormatted);
+              }
+              const keptMatchText =
+                jobs.length > 1
+                  ? takeFirstLines(text, Math.max(0, remainingOutputLines - 1))
+                  : keptFormatted;
+              matchedLines += countNonEmptyLines(keptMatchText);
+              outputLimitReached = true;
+              addWarning(
+                `Search reached the ${MAX_TOTAL_SEARCH_LINES.toLocaleString()} line limit; remaining results were omitted. Narrow the query or search fewer paths.`,
+              );
+              break;
+            }
+
+            outputs.push(formatted);
+            outputBytes += separatorBytes + formattedBytes;
+            outputLines += separatorLines + formattedLines;
+            matchedLines += countNonEmptyLines(text);
           }
           continue;
         }
@@ -656,19 +848,31 @@ export default function tgrepExtension(pi: ExtensionAPI) {
           continue;
         }
 
-        const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.exitCode}`;
+        const detail = compactWarning(
+          result.stderr.trim() || result.stdout.trim() || `exit code ${result.exitCode}`,
+        );
         if (outputs.length === 0) {
           throw new Error(`${job.label}: tgrep failed: ${detail}`);
         }
-        warnings.push(`${job.label}: tgrep failed: ${detail}`);
+        addWarning(`${job.label}: tgrep failed: ${detail}`);
       }
 
       if (outputs.length === 0) {
-        const warningText = warnings.length
-          ? `\n\nWarnings:\n${warnings.map((warning) => `- ${warning}`).join("\n")}`
+        const finalWarnings = visibleWarnings();
+        const warningText = finalWarnings.length
+          ? `\n\nWarnings:\n${finalWarnings.map((warning) => `- ${warning}`).join("\n")}`
           : "";
+        const message = `${outputLimitReached ? "Search incomplete; output limits were reached before any results could be returned." : "No matches found."}${warningText}`;
+        const truncation = truncateHead(message, {
+          maxLines: DEFAULT_MAX_LINES,
+          maxBytes: DEFAULT_MAX_BYTES,
+        });
+        let text = truncation.content;
+        if (truncation.truncated) {
+          text += "\n\n[Warning output truncated; see tool details for recorded warnings.]";
+        }
         return {
-          content: [{ type: "text", text: `No matches found.${warningText}` }],
+          content: [{ type: "text", text }],
           details: {
             pattern: params.pattern,
             mode: state.mode,
@@ -676,15 +880,16 @@ export default function tgrepExtension(pi: ExtensionAPI) {
             repositoryCount: state.repos.length,
             jobs: jobDetails,
             matchedLines: 0,
-            truncated: false,
-            warnings: warnings.length ? warnings : undefined,
+            truncated: outputLimitReached || truncation.truncated,
+            warnings: finalWarnings.length ? finalWarnings : undefined,
           } satisfies TgrepDetails,
         };
       }
 
       let combined = outputs.join("\n\n");
-      if (warnings.length) {
-        combined += `\n\nWarnings:\n${warnings.map((warning) => `- ${warning}`).join("\n")}`;
+      const finalWarnings = visibleWarnings();
+      if (finalWarnings.length) {
+        combined += `\n\nWarnings:\n${finalWarnings.map((warning) => `- ${warning}`).join("\n")}`;
       }
 
       const truncation = truncateHead(combined, {
@@ -699,13 +904,13 @@ export default function tgrepExtension(pi: ExtensionAPI) {
         repositoryCount: state.repos.length,
         jobs: jobDetails,
         matchedLines,
-        truncated: truncation.truncated,
-        warnings: warnings.length ? warnings : undefined,
+        truncated: truncation.truncated || outputLimitReached,
+        warnings: finalWarnings.length ? finalWarnings : undefined,
       };
 
       let text = truncation.content;
 
-      if (truncation.truncated) {
+      if (truncation.truncated && !outputLimitReached) {
         const tempDir = await mkdtemp(join(tmpdir(), "pi-tgrep-"));
         const outputPath = join(tempDir, "output.txt");
 
@@ -719,6 +924,11 @@ export default function tgrepExtension(pi: ExtensionAPI) {
           `\n\n[Output truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines ` +
           `(${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}). ` +
           `Full output saved to: ${outputPath}]`;
+      }
+
+      if (outputLimitReached) {
+        text +=
+          `\n\n[Search incomplete: the output limit was reached; some paths or results were omitted.]`;
       }
 
       return {
