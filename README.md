@@ -43,6 +43,11 @@ Try it for one Pi session:
 pi -e git:github.com/skyland-zero/pi-tgrep
 ```
 
+The package includes a `tgrep` skill in `skills/tgrep/SKILL.md`. Pi loads package
+skills automatically. The `pi install` command above installs the package and
+skill globally by default; use `pi install -l git:github.com/skyland-zero/pi-tgrep`
+to keep both project-local.
+
 ## Automatic indexing policy
 
 The Pi launch directory is the trust boundary. Discovery happens at session
