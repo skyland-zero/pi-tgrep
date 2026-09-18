@@ -48,6 +48,14 @@ skills automatically. The `pi install` command above installs the package and
 skill globally by default; use `pi install -l git:github.com/skyland-zero/pi-tgrep`
 to keep both project-local.
 
+For a global install, the package's `postinstall` script adds a marked, concise
+tgrep rule to `~/.pi/agent/AGENTS.md` (or `$PI_CODING_AGENT_DIR/AGENTS.md`). It
+does not edit that file for project-local installs or local development installs.
+Set `PI_TGREP_SKIP_GLOBAL_RULE=1` to skip the global rule. If npm install scripts
+are disabled, run `node scripts/install-global-instructions.mjs --force` from
+the package directory. Run the same script with `--remove` to remove its marked
+rule later.
+
 ## Automatic indexing policy
 
 The Pi launch directory is the trust boundary. Discovery happens at session

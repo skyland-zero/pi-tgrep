@@ -15,6 +15,7 @@
     "microsoft"
   ],
   "scripts": {
+    "postinstall": "node scripts/install-global-instructions.mjs",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck"
   },
