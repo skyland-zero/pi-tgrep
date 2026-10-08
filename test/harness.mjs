@@ -88,7 +88,16 @@ async function runPolicyTests() {
   await policyCase("git log --grep needle", "translate", { action: "allow" });
   // BRE-only patterns run verbatim: original grep preserves exact semantics
   await policyCase("grep 'a\\(b\\)' f", "translate", { action: "allow" });
-  await policyCase("rg --files", "translate", { action: "rewrite", command: "tgrep search --index-path '/repo/.tgrep' --files" }, IDX);
+  await policyCase("rg --files", "translate", { action: "rewrite", command: "tgrep --index-path '/repo/.tgrep' --files" }, IDX);
+  // `--files` lists paths, so every positional is a path and the rewrite needs the bare query mode:
+  // the `search` subcommand would treat the path as a pattern and match content instead.
+  await policyCase("rg --files src", "translate", { action: "rewrite", command: "tgrep --index-path '/repo/.tgrep' --files src" }, IDX);
+  await policyCase("rg --files -g '*.ts' src docs", "translate", { action: "rewrite", command: "tgrep --index-path '/repo/.tgrep' --files -g '*.ts' src docs" }, IDX);
+  // An absolute path is outside the repo, so the rewrite must not inject the repo's index.
+  await policyCase("rg --files /abs", "translate", {
+    action: "rewrite",
+    command: "tgrep --files /abs",
+  }, IDX);
   await policyCase("sudo grep -i needle /etc/hosts", "translate", {
     action: "rewrite",
     command: "sudo tgrep search -i needle /etc/hosts",
@@ -195,6 +204,35 @@ async function runBackslashPatternExecTest() {
   assert.match(matches[0], /data\.txt:1:/);
   await rm(dir, { recursive: true, force: true });
   console.log("backslash pattern exec test ok");
+}
+
+async function runFilesExecTest() {
+  const dir = await mkdtemp(path.join(tmpdir(), "pi-tgrep-files-"));
+  await mkdir(path.join(dir, "src"), { recursive: true });
+  await writeFile(path.join(dir, "src/needle.ts"), "const needle = 1;\n");
+  await writeFile(path.join(dir, "src/other.md"), "needle\n");
+  // No index context: the point is the rewrite's shape, and it must run without an index too.
+  const result = await applyBashPolicy("rg --files -g '*.ts' src", "translate");
+  assert.equal(result.action, "rewrite");
+  assert.equal(result.command, "tgrep --files -g '*.ts' src");
+  const { stdout } = await execFileP(SHELL, ["-c", result.command], { cwd: dir, encoding: "utf8" });
+  const lines = stdout.split("\n").filter(Boolean);
+  assert.ok(
+    lines.some((line) => line.includes("needle.ts")),
+    `expected the .ts file to be listed, got: ${JSON.stringify(lines)}`,
+  );
+  assert.ok(
+    !lines.some((line) => line.includes("other.md")),
+    `the glob must filter, got: ${JSON.stringify(lines)}`,
+  );
+  // Paths, not matches: `tgrep search --files src` would print `path:line: content` for the
+  // pattern "src" instead of listing the directory.
+  assert.ok(
+    lines.every((line) => !line.includes(":")),
+    `expected bare paths, got: ${JSON.stringify(lines)}`,
+  );
+  await rm(dir, { recursive: true, force: true });
+  console.log("files exec test ok");
 }
 
 async function runWatchedToolsTests() {
@@ -439,6 +477,7 @@ try {
   await runPolicyTests();
   await runRedirectExecTest();
   await runBackslashPatternExecTest();
+  await runFilesExecTest();
   await runWatchedToolsTests();
   runGrepArgsTests(repoDir);
   await runGrepToolTests(repoDir);

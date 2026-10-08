@@ -24,6 +24,9 @@ pi-tgrep — what changed for them, not how it was implemented internally.
 
 ### Fixed
 
+- `rg --files` and `rg --files <path>` no longer translate to `tgrep search --files …`, which listed
+  nothing and searched for the path as a pattern instead; they now use tgrep's bare file-listing mode
+  and list what ripgrep would list.
 - Windows: tgrep is discovered with `where.exe` and every candidate is probed before use, so a
   listing Node cannot spawn (Git Bash drive paths such as `/c/Users/...`, the `.exe` suffix Git Bash
   strips, `.cmd`/`.bat` shims) no longer sends every search to the ripgrep fallback.

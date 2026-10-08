@@ -972,9 +972,14 @@ function policySegment(
   const forceScan = bin === "rg" && rest.some((t) => t.text === "--files");
   const minPositionals = translation.patternFlag ? 1 : 2;
   if (translation.positionals.length < minPositionals && !forceScan) return { kind: "verbatim" };
-  const rendered = ["tgrep", "search"];
+  // `--files` lists paths instead of matching content, and only the bare query mode does that:
+  // `tgrep search --files src` would search for the pattern "src" rather than list src/.
+  const rendered = forceScan ? ["tgrep"] : ["tgrep", "search"];
   const hasIndexPath = translation.tokens.some((t) => t.text.startsWith("--index-path"));
-  const paths = translation.patternFlag ? translation.positionals : translation.positionals.slice(1);
+  // Every positional after `--files` is a path, not a pattern.
+  const paths = forceScan
+    ? translation.positionals
+    : translation.patternFlag ? translation.positionals : translation.positionals.slice(1);
   const allPathsRelative = paths.every((p) => !p.startsWith("/") && !p.startsWith("~"));
   if (indexPath && !hasIndexPath && allPathsRelative) {
     rendered.push("--index-path", emitToken(indexPath, true));
