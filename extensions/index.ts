@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { hasIndexPathOverride, loadConfig, resolveIndexPath } from "../src/config.ts";
 import { applyToolCallPolicy, watchedKey } from "../src/watched-tools.ts";
-import { createGrepToolOverride } from "../src/grep-tool.ts";
+import { createGrepToolOverride, createStatusCache } from "../src/grep-tool.ts";
 import { buildRewriteNote, isEmptyBashOutput } from "../src/rewrite-annotation.ts";
 import { repoRoot, ServerManager } from "../src/server-manager.ts";
 import { findTgrep, resetBinaryCache, status } from "../src/tgrep-client.ts";
@@ -46,6 +46,8 @@ export default function piTgrep(pi: ExtensionAPI) {
   if (cfg.disabled) return;
 
   const manager = new ServerManager(pi, cfg);
+  // One memo for the session: the grep tool must not spawn `tgrep status` on every search.
+  const statusCache = createStatusCache();
   let toolRegistered = false;
   let sessionSeq = 0;
   // toolCallId -> rewritten provenance; session logs persist pre-rewrite args, so the
@@ -74,7 +76,7 @@ export default function piTgrep(pi: ExtensionAPI) {
     const bin = await findTgrep(pi);
     if (!bin) return false;
     if (!toolRegistered) {
-      pi.registerTool(createGrepToolOverride(pi));
+      pi.registerTool(createGrepToolOverride(pi, statusCache));
       toolRegistered = true;
     }
     return true;
@@ -198,6 +200,7 @@ export default function piTgrep(pi: ExtensionAPI) {
         return;
       }
       ctx.ui.notify(`tgrep: rebuilding index for ${root}…`, "info");
+      statusCache.clear();
       ctx.ui.notify(`tgrep: ${await manager.reindex(root)}`, "info");
     },
   });

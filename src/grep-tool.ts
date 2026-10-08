@@ -15,7 +15,7 @@ import { createInterface } from "node:readline";
 import path from "node:path";
 import { Type, type Static } from "typebox";
 import { hasIndexPathOverride, resolveIndexPath } from "./config.ts";
-import { findTgrep, status } from "./tgrep-client.ts";
+import { findTgrep, status, type TgrepStatus } from "./tgrep-client.ts";
 import { repoRoot } from "./server-manager.ts";
 
 const grepSchema = Type.Object({
@@ -201,7 +201,48 @@ async function isDir(p: string): Promise<boolean> {
   }
 }
 
-export function createGrepToolOverride(pi: ExtensionAPI): ToolDefinition<typeof grepSchema> {
+/** How long a verdict that the index is still building is trusted before probing again. */
+const INDEXING_RECHECK_MS = 5_000;
+
+interface StatusEntry {
+  status: TgrepStatus;
+  at: number;
+}
+
+/**
+ * Per-session memo for the indexing verdict. `tgrep status` costs a process spawn on every search
+ * (about 40ms on Windows, comparable to the search itself), and the verdict only decides whether a
+ * search runs on tgrep or falls back to ripgrep. A verdict that the index settled — running
+ * complete, or absent — stays stored: tgrep answers from its on-disk index either way, so re-probing
+ * would buy nothing. Only "still building" is re-checked, after a short delay.
+ */
+export interface StatusCache {
+  /** Returns the verdict for `root`, probing through `probe` only when the memo has nothing usable. */
+  get(root: string, probe: () => Promise<TgrepStatus>): Promise<TgrepStatus>;
+  /** Drops every verdict so the next search probes again, for a rebuilt or replaced index. */
+  clear(): void;
+}
+
+export function createStatusCache(recheckMs: number = INDEXING_RECHECK_MS): StatusCache {
+  const entries = new Map<string, StatusEntry>();
+  return {
+    async get(root, probe) {
+      const cached = entries.get(root);
+      if (cached) {
+        const settled = cached.status.kind !== "server" || cached.status.indexingComplete;
+        if (settled || Date.now() - cached.at < recheckMs) return cached.status;
+      }
+      const status = await probe();
+      entries.set(root, { status, at: Date.now() });
+      return status;
+    },
+    clear() {
+      entries.clear();
+    },
+  };
+}
+
+export function createGrepToolOverride(pi: ExtensionAPI, statusCache: StatusCache = createStatusCache()): ToolDefinition<typeof grepSchema> {
   return {
     name: "grep",
     label: "grep",
@@ -248,7 +289,9 @@ export function createGrepToolOverride(pi: ExtensionAPI): ToolDefinition<typeof 
             indexDirExists = (await stat(indexDir)).isDirectory();
           } catch {}
           index = { root, indexDirExists };
-          const st = await status(pi, root, hasIndexPathOverride() ? indexDir : undefined);
+          const st = await statusCache.get(root, () =>
+            status(pi, root, hasIndexPathOverride() ? indexDir : undefined),
+          );
           if (st.kind === "server" && !st.indexingComplete) {
             const fallback = await delegateToBuiltin({ reason: "indexing", message: "tgrep index still building" });
             if (fallback) return fallback;

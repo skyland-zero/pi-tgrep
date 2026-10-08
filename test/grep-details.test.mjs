@@ -4,7 +4,7 @@ import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { createGrepToolOverride } from "../src/grep-tool.ts";
+import { createGrepToolOverride, createStatusCache } from "../src/grep-tool.ts";
 import { resetBinaryCache } from "../src/tgrep-client.ts";
 import { LIST_BINARY } from "./platform.mjs";
 
@@ -22,7 +22,7 @@ const INDEXING_STATUS = [
   "",
 ].join("\n");
 
-function makePi({ whichResult, statusText } = {}) {
+function makePi({ whichResult, statusText, statusCalls } = {}) {
   // The discovered binary is an absolute path, so match it by name rather than by the bare command.
   const isTgrep = (command) => /(^|[\\/])tgrep(\.exe)?$/i.test(command);
   return {
@@ -31,8 +31,9 @@ function makePi({ whichResult, statusText } = {}) {
       if ((command === LIST_BINARY || command === "which") && args[0] === "tgrep" && whichResult !== undefined) {
         return whichResult;
       }
-      if (isTgrep(command) && args[0] === "status" && statusText !== undefined) {
-        return { stdout: statusText, stderr: "", code: 0, killed: false };
+      if (isTgrep(command) && args[0] === "status") {
+        statusCalls?.push(Date.now());
+        if (statusText !== undefined) return { stdout: statusText, stderr: "", code: 0, killed: false };
       }
       try {
         const { stdout, stderr } = await execFileP(command, args, {
@@ -57,6 +58,46 @@ await cp(FIXTURE, repoDir, { recursive: true });
 await execFileP("git", ["init"], { cwd: repoDir });
 
 const ctx = { cwd: repoDir, ui: {} };
+
+async function runStatusCacheTests() {
+  // A settled verdict is memoized for the session. Without it every search pays a `tgrep status`
+  // spawn, which on Windows costs about as much as the search itself.
+  const settledCalls = [];
+  resetBinaryCache();
+  const cached = createGrepToolOverride(makePi({ statusCalls: settledCalls }));
+  await cached.execute("s1", { pattern: "needle" }, undefined, undefined, ctx);
+  await cached.execute("s2", { pattern: "needle" }, undefined, undefined, ctx);
+  await cached.execute("s3", { pattern: "needle" }, undefined, undefined, ctx);
+  assert.equal(settledCalls.length, 1, `a settled index must be probed once, saw ${settledCalls.length}`);
+
+  // A build in progress is re-checked after the recheck delay, so the fallback ends by itself once
+  // the index is ready.
+  const indexingCalls = [];
+  resetBinaryCache();
+  // The search itself takes longer than a tiny delay, so the reuse check needs a generous TTL and
+  // the expiry check its own one-millisecond cache.
+  const reused = createStatusCache(5_000);
+  const indexing = createGrepToolOverride(makePi({ statusText: INDEXING_STATUS, statusCalls: indexingCalls }), reused);
+  const first = await indexing.execute("s4", { pattern: "needle" }, undefined, undefined, ctx);
+  assert.equal(first.details.fallback.reason, "indexing");
+  assert.equal(indexingCalls.length, 1, "the first search must probe");
+  await indexing.execute("s5", { pattern: "needle" }, undefined, undefined, ctx);
+  assert.equal(indexingCalls.length, 1, "a fresh in-progress verdict must be reused, not re-probed");
+
+  const expiring = createStatusCache(1);
+  const expiringTool = createGrepToolOverride(makePi({ statusText: INDEXING_STATUS, statusCalls: indexingCalls }), expiring);
+  await expiringTool.execute("s6", { pattern: "needle" }, undefined, undefined, ctx);
+  assert.equal(indexingCalls.length, 2, "a new cache must probe again");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  await expiringTool.execute("s7", { pattern: "needle" }, undefined, undefined, ctx);
+  assert.equal(indexingCalls.length, 3, "an expired in-progress verdict must be re-probed");
+
+  // clear() drops the memo, which is what /tgrep-reindex asks for.
+  expiring.clear();
+  await expiringTool.execute("s8", { pattern: "needle" }, undefined, undefined, ctx);
+  assert.equal(indexingCalls.length, 4, "clear() must force a fresh probe");
+  console.log("status cache tests ok");
+}
 
 try {
   resetBinaryCache();
@@ -114,6 +155,8 @@ try {
   assert.equal(noBinary.details.fallback.reason, "no-binary");
   assert.match(noBinary.content[0].text, /src\/app\.ts/);
   console.log("fallback-no-binary details ok");
+
+  await runStatusCacheTests();
 } finally {
   resetBinaryCache();
   await rm(repoDir, { recursive: true, force: true });

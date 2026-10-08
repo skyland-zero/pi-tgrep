@@ -10,6 +10,12 @@ pi-tgrep — what changed for them, not how it was implemented internally.
 
 ## [Unreleased]
 
+### Changed
+
+- Searches no longer spawn `tgrep status` before every query. The indexing verdict is memoized for
+  the session (a build in progress is re-checked every few seconds), which takes roughly a third
+  off the latency of each `grep` tool call where spawning a process is the dominant cost.
+
 ### Added
 
 - `PI_TGREP_BIN` sets the tgrep executable to use, for installs the `PATH` search cannot resolve
