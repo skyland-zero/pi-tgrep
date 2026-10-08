@@ -11,6 +11,20 @@ import { findTgrep, resetBinaryCache, status } from "../src/tgrep-client.ts";
 
 const DECISIONS_FILE = path.join(homedir(), ".cache", "pi-tgrep", "auto-install.json");
 
+/** Where to get tgrep on this platform, since only macOS has a formula the extension can drive. */
+function installHint(): string {
+  if (process.platform === "win32") {
+    return "Install it from github.com/microsoft/tgrep (the x86_64-pc-windows-msvc release) and make sure tgrep.exe is on PATH, or set PI_TGREP_BIN to its full path.";
+  }
+  if (process.platform === "darwin") {
+    return "Install it with brew (brew install tgrep), or build it from github.com/microsoft/tgrep and set PI_TGREP_BIN.";
+  }
+  return "Build it from github.com/microsoft/tgrep (cargo install tgrep) and set PI_TGREP_BIN if it is not on PATH.";
+}
+
+/** Automatic installs need a package manager to call; Windows has none the extension can rely on. */
+const BREW = process.platform === "darwin" ? { command: "brew", args: ["install", "tgrep"] } : null;
+
 async function loadDecision(): Promise<"yes" | "no" | null> {
   try {
     const raw = JSON.parse(await readFile(DECISIONS_FILE, "utf-8")) as { decision?: unknown };
@@ -68,6 +82,16 @@ export default function piTgrep(pi: ExtensionAPI) {
 
   const tryAutoInstall = async (ctx: ExtensionContext): Promise<boolean> => {
     if (cfg.autoInstall === "never") return false;
+    if (!BREW) {
+      // Without an installer to run, say what to do once instead of failing inside a missing brew.
+      if (cfg.autoInstall === "ask") {
+        const prior = await loadDecision();
+        if (prior === "no") return false;
+        if (ctx.hasUI) void persistDecision("no");
+      }
+      ctx.ui.notify(`pi-tgrep: tgrep is not installed or not runnable. ${installHint()}`, "warning");
+      return false;
+    }
     if (cfg.autoInstall === "ask") {
       const prior = await loadDecision();
       if (prior === "no") return false;
@@ -80,7 +104,7 @@ export default function piTgrep(pi: ExtensionAPI) {
     }
     ctx.ui.setStatus("tgrep", "tgrep: installing via brew…");
     try {
-      const res = await pi.exec("brew", ["install", "tgrep"], { timeout: 600_000 });
+      const res = await pi.exec(BREW.command, BREW.args, { timeout: 600_000 });
       if (res.code !== 0) {
         ctx.ui.notify(`pi-tgrep: brew install failed: ${res.stderr.trim().slice(0, 200)}`, "warning");
         return false;
@@ -103,6 +127,8 @@ export default function piTgrep(pi: ExtensionAPI) {
     }
     const st = await manager.ensureRunning(root);
     ctx.ui.setStatus("tgrep", manager.describe(st));
+    // A daemon that could not start leaves no trace otherwise: the footer only says "no index".
+    if (manager.lastStartError) ctx.ui.notify(`pi-tgrep: ${manager.lastStartError}`, "warning");
     if (!(st.kind === "server" && st.indexingComplete)) {
       void manager.monitor(root, (line) => {
         if (seq === sessionSeq) ctx.ui.setStatus("tgrep", line);

@@ -11,6 +11,7 @@ import { buildTgrepArgs, createGrepToolOverride } from "../src/grep-tool.ts";
 import { ServerManager } from "../src/server-manager.ts";
 import { pidAlive, resetBinaryCache, status } from "../src/tgrep-client.ts";
 import piTgrep from "../extensions/index.ts";
+import { LIST_BINARY } from "./platform.mjs";
 
 const execFileP = promisify(execFile);
 const FIXTURE = path.resolve(import.meta.dirname, "fixtures/repo");
@@ -44,6 +45,14 @@ function restoreEnv(saved) {
 
 function makeFakePi(commandOverrides = {}) {
   const calls = [];
+  // The extension lists candidates with `where.exe` on Windows and `which` elsewhere, so a test
+  // that stubs one of them means the same thing on either platform.
+  const overrides = { ...commandOverrides };
+  const listed = overrides[LIST_BINARY] ?? overrides.which;
+  if (listed) {
+    overrides[LIST_BINARY] = listed;
+    overrides.which = listed;
+  }
   const pi = {
     calls,
     handlers: {},
@@ -58,7 +67,7 @@ function makeFakePi(commandOverrides = {}) {
     },
     async exec(command, args, options = {}) {
       calls.push({ kind: "exec", command, args });
-      const override = commandOverrides[command];
+      const override = overrides[command];
       if (override) return typeof override === "function" ? override(args) : override;
       try {
         const { stdout, stderr } = await execFileP(command, args, { cwd: options.cwd, timeout: options.timeout });
@@ -147,7 +156,11 @@ test("PI_TGREP_AUTO_INSTALL=never stays dormant without prompting", async () => 
   }
 });
 
-test("PI_TGREP_AUTO_INSTALL=always installs via brew without prompting", async () => {
+test("PI_TGREP_AUTO_INSTALL=always installs via brew without prompting", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("the automatic installer is Homebrew-only; see the Windows notification test");
+    return;
+  }
   const saved = setEnv({ PI_TGREP_AUTO_INSTALL: "always" });
   const dir = await mkdtemp(path.join(tmpdir(), "pi-tgrep-nogit-"));
   resetBinaryCache();
@@ -174,6 +187,33 @@ test("PI_TGREP_AUTO_INSTALL=always installs via brew without prompting", async (
     const registered = pi.calls.filter((c) => c.kind === "registerTool");
     assert.equal(registered.length, 1, "grep override must register after install");
     assert.equal(registered[0].name, "grep");
+  } finally {
+    resetBinaryCache();
+    await rm(dir, { recursive: true, force: true });
+    restoreEnv(saved);
+  }
+});
+
+test("a platform without an installer tells the user what to do instead of running brew", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("Windows-only path: no package manager the extension can drive");
+    return;
+  }
+  const saved = setEnv({ PI_TGREP_AUTO_INSTALL: "always" });
+  const dir = await mkdtemp(path.join(tmpdir(), "pi-tgrep-nogit-"));
+  resetBinaryCache();
+  const pi = makeFakePi({ which: () => ({ stdout: "", stderr: "", code: 1, killed: false }) });
+  const uiCalls = [];
+  try {
+    piTgrep(pi);
+    await pi.handlers.session_start({}, { cwd: dir, hasUI: true, ui: makeUi(uiCalls) });
+
+    assert.ok(!pi.calls.some((c) => c.kind === "exec" && c.command === "brew"), "Windows must not call brew");
+    const notices = uiCalls.filter((c) => c.kind === "notify");
+    assert.equal(notices.length, 1, "the user must learn how to install tgrep");
+    assert.match(String(notices[0].args[0]), /tgrep/i);
+    assert.match(String(notices[0].args[0]), /PI_TGREP_BIN/);
+    assert.ok(!pi.calls.some((c) => c.kind === "registerTool"), "missing binary must stay dormant");
   } finally {
     resetBinaryCache();
     await rm(dir, { recursive: true, force: true });

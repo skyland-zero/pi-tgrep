@@ -104,7 +104,8 @@ pi install git:github.com/danielmarbach/pi-tgrep
 pi install npm:@danielmarbach/pi-tgrep
 ```
 
-Requires the `tgrep` binary (`brew install tgrep`, or cargo from the tgrep repo). If it is
+Requires the `tgrep` binary (`brew install tgrep` on macOS, the `x86_64-pc-windows-msvc` or
+`aarch64-pc-windows-msvc` release zip on Windows, cargo from the tgrep repo elsewhere). If it is
 missing, pi-tgrep offers to install it via Homebrew once (see `PI_TGREP_AUTO_INSTALL`).
 
 For development, skip the install and load it directly:
@@ -112,6 +113,22 @@ For development, skip the install and load it directly:
 ```bash
 pi -e /path/to/pi-tgrep/extensions
 ```
+
+### Windows
+
+pi on Windows uses Git Bash, which is what the shell guard targets; the search path itself needs no
+special setup:
+
+- The binary is looked up with `where.exe` and every candidate is probed with `tgrep --version`
+  before it is used, because a Windows listing can name things Node cannot start: Git Bash prints
+  drive paths (`/c/Users/...`) and drops the `.exe` suffix, and `.cmd`/`.bat` shims need a shell.
+  Only `.exe`/`.com` candidates are used; if tgrep lives somewhere unusual (or only as a shim), set
+  `PI_TGREP_BIN` to the executable.
+- `/tgrep-stop` verifies the recorded pid with `tasklist`, so a recycled pid is never signalled.
+- There is no package manager the extension can drive, so a missing binary produces a one-time
+  notice pointing at the release download instead of a `brew install` that cannot work.
+- Commands run through the `powershell` tool are not watched: the policy parses POSIX shell syntax.
+- `test/` needs Git Bash (`C:\Program Files\Git\bin\bash.exe`, or `PI_TGREP_TEST_SHELL`).
 
 ## Configuration
 
@@ -125,6 +142,7 @@ All configuration is via environment variables.
 | `PI_TGREP_WATCH_TOOLS` | – | additional tool names to watch, comma-separated, additive to the default set (`bash`, `ctx_execute`, `ctx_execute_file`, `ctx_batch_execute`); names match bare or `namespace__name` |
 | `PI_TGREP_SERVE_ARGS` | – | extra args passed to `tgrep serve` (e.g. `"--exclude vendor --no-watch"`); split on whitespace, quotes are not parsed, so individual args cannot contain spaces |
 | `PI_TGREP_INDEX_PATH` | tgrep default (`<repo>/.tgrep`) | index directory override, honored everywhere: `serve`, `status`/stop/`reindex`, the grep tool, and shell injection; relative values resolve against the repo root |
+| `PI_TGREP_BIN` | – | full path to the tgrep executable for installs the `PATH` search cannot use (a renamed release binary, a download outside `PATH`); it is probed with `tgrep --version` and wins over discovery, and a value that does not run leaves the extension dormant |
 | `PI_TGREP_SCOPE` | `repo` | `repo` keeps the server after the session ends; `session` stops servers this session started on shutdown |
 
 ## Commands

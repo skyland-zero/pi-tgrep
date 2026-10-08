@@ -52,6 +52,8 @@ export class ServerManager {
   private pi: ExtensionAPI;
   private cfg: TgrepConfig;
   private roots = new Set<string>();
+  /** Why the last start attempt failed, so the session can surface it instead of a silent no-op. */
+  lastStartError: string | undefined;
 
   constructor(pi: ExtensionAPI, cfg: TgrepConfig) {
     this.pi = pi;
@@ -65,23 +67,38 @@ export class ServerManager {
 
   async ensureRunning(root: string): Promise<TgrepStatus> {
     const indexDir = this.indexDir(root);
+    this.lastStartError = undefined;
     let st = await status(this.pi, root, indexDir);
     if (st.kind === "server") return st;
     const bin = await findTgrep(this.pi);
-    if (!bin) return st;
+    if (!bin) {
+      this.lastStartError = "tgrep binary not found or not runnable";
+      return st;
+    }
     await ensureGitExclude(root);
     const args = ["serve", root, ...this.cfg.serveArgs];
     if (this.cfg.indexPath) args.push("--index-path", resolveIndexPath(root));
+    // An unhandled spawn "error" event would crash the host, so the failure is captured and the
+    // readiness wait is cut short instead of polling for ten seconds after a dead start.
+    let spawnError: Error | undefined;
     try {
-      const child = spawn(bin, args, { cwd: root, detached: true, stdio: "ignore" });
+      const child = spawn(bin, args, { cwd: root, detached: true, stdio: "ignore", windowsHide: true });
+      child.once("error", (error: Error) => {
+        spawnError = error;
+      });
       child.unref();
-    } catch {
+    } catch (error) {
+      this.lastStartError = `could not start tgrep serve: ${error instanceof Error ? error.message : String(error)}`;
       return st;
     }
     this.roots.add(root);
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
       await sleep(250);
+      if (spawnError) {
+        this.lastStartError = `could not start tgrep serve: ${spawnError.message}`;
+        return st;
+      }
       st = await status(this.pi, root, indexDir);
       if (st.kind === "server") return st;
     }
@@ -126,9 +143,12 @@ export class ServerManager {
   async reindex(root: string): Promise<string> {
     const indexDir = this.indexDir(root);
     await this.stop(root);
+    // The discovered command, not the bare name: it already proved runnable for this platform.
+    const bin = await findTgrep(this.pi);
+    if (!bin) return "tgrep binary not found or not runnable";
     const args = ["index", root];
     if (indexDir) args.push("--index-path", indexDir);
-    const res = await this.pi.exec("tgrep", args, { timeout: 600_000 });
+    const res = await this.pi.exec(bin, args, { timeout: 600_000, cwd: root });
     await this.ensureRunning(root);
     return res.code === 0 ? `reindexed ${root}` : `index failed: ${res.stderr.trim().slice(0, 300)}`;
   }

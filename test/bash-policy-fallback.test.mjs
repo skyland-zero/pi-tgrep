@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { applyBashPolicy } from "../src/bash-policy.ts";
 import { applyToolCallPolicy } from "../src/watched-tools.ts";
 
@@ -137,12 +138,16 @@ async function runFallbackTests() {
   assert.equal(cdResolution.action, "rewrite");
   assert.equal(cdResolution.command, "cd /repo && tgrep search --index-path '/repo/.tgrep' -n foo src/");
   assert.deepEqual(resolvedCalls, ["/repo"], "relative cd targets resolve against the base cwd");
+  // A relative cd target is resolved with the host's own rules, so the expected directories come
+  // from path.resolve instead of POSIX literals (on Windows `/base/x` + `../repo` is not `/base/repo`).
+  const baseCwd = path.resolve("/base/x");
+  const repoCwd = path.resolve(baseCwd, "../repo");
   const relCd = await applyBashPolicy("cd ../repo && grep foo .", "translate", {
-    cwd: "/base/x",
-    resolveIndex: async (cwd) => (cwd === "/base/repo" ? "/base/repo/.tgrep" : undefined),
+    cwd: baseCwd,
+    resolveIndex: async (cwd) => (cwd === repoCwd ? `${repoCwd}/.tgrep` : undefined),
   });
   assert.equal(relCd.action, "rewrite");
-  assert.equal(relCd.command, "cd ../repo && tgrep search --index-path '/base/repo/.tgrep' foo .");
+  assert.equal(relCd.command, `cd ../repo && tgrep search --index-path '${repoCwd}/.tgrep' foo .`);
   const noRepo = await applyBashPolicy("grep foo .", "translate", {
     cwd: "/outside",
     resolveIndex: async () => undefined,

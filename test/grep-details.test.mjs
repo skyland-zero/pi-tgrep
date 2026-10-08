@@ -6,6 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { createGrepToolOverride } from "../src/grep-tool.ts";
 import { resetBinaryCache } from "../src/tgrep-client.ts";
+import { LIST_BINARY } from "./platform.mjs";
 
 const execFileP = promisify(execFile);
 
@@ -22,12 +23,15 @@ const INDEXING_STATUS = [
 ].join("\n");
 
 function makePi({ whichResult, statusText } = {}) {
+  // The discovered binary is an absolute path, so match it by name rather than by the bare command.
+  const isTgrep = (command) => /(^|[\\/])tgrep(\.exe)?$/i.test(command);
   return {
     async exec(command, args, options = {}) {
-      if (command === "which" && args[0] === "tgrep" && whichResult !== undefined) {
+      // The extension asks `where.exe` on Windows and `which` elsewhere for the same discovery step.
+      if ((command === LIST_BINARY || command === "which") && args[0] === "tgrep" && whichResult !== undefined) {
         return whichResult;
       }
-      if (command === "tgrep" && args[0] === "status" && statusText !== undefined) {
+      if (isTgrep(command) && args[0] === "status" && statusText !== undefined) {
         return { stdout: statusText, stderr: "", code: 0, killed: false };
       }
       try {
@@ -86,12 +90,19 @@ try {
   console.log("fallback-while-indexing details ok");
 
   resetBinaryCache();
+  // Windows filters the listing down to spawnable .exe/.com paths and probes each candidate with
+  // `tgrep --version`, so an unusable entry degrades to "no-binary" instead of reaching spawn.
+  const missingBinary = process.platform === "win32" ? "C:\\nonexistent\\pi-tgrep-missing-tgrep.exe" : "/nonexistent/pi-tgrep-missing-tgrep";
   const errored = await createGrepToolOverride(
-    makePi({ whichResult: { stdout: "/nonexistent/pi-tgrep-missing-tgrep\n", stderr: "", code: 0, killed: false } }),
+    makePi({ whichResult: { stdout: `${missingBinary}\n`, stderr: "", code: 0, killed: false } }),
   ).execute("d4", { pattern: "needle" }, undefined, undefined, ctx);
   assert.equal(errored.details.engine, "rg-fallback");
-  assert.equal(errored.details.fallback.reason, "error");
-  assert.match(errored.details.fallback.message, /nonexistent|ENOENT|spawn/i);
+  if (process.platform === "win32") {
+    assert.equal(errored.details.fallback.reason, "no-binary");
+  } else {
+    assert.equal(errored.details.fallback.reason, "error");
+    assert.match(errored.details.fallback.message, /nonexistent|ENOENT|spawn/i);
+  }
   assert.match(errored.content[0].text, /src\/app\.ts/);
   console.log("fallback-on-error details ok");
 

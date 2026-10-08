@@ -14,6 +14,15 @@ export function hasIndexPathOverride(): boolean {
   return Boolean(process.env.PI_TGREP_INDEX_PATH);
 }
 
+/**
+ * Explicit tgrep executable from `PI_TGREP_BIN`, for installs the PATH search cannot resolve (a
+ * release binary outside PATH, an unusual extension). When set it wins outright: a broken override
+ * leaves the extension dormant instead of silently falling back to a different binary.
+ */
+export function binOverride(): string | undefined {
+  return env("PI_TGREP_BIN");
+}
+
 const DEFAULT_WATCHED_TOOLS = ["bash", "ctx_execute", "ctx_execute_file", "ctx_batch_execute"];
 
 export interface TgrepConfig {

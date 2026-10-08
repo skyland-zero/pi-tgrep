@@ -126,7 +126,12 @@ function runSearch(
     };
     let child: ChildProcess;
     try {
-      child = spawn(bin, buildTgrepArgs(params, searchPath, index), { cwd, stdio: ["ignore", "pipe", "pipe"] });
+      child = spawn(bin, buildTgrepArgs(params, searchPath, index), {
+        cwd,
+        stdio: ["ignore", "pipe", "pipe"],
+        // Keeps a console window from flashing for every search on Windows.
+        windowsHide: true,
+      });
     } catch (error) {
       outcome.spawnError = error instanceof Error ? error : new Error(String(error));
       resolve(outcome);

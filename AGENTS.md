@@ -49,3 +49,16 @@ goes through it, so a scanning change applies to all of them:
 Do not add a second shell parser in `watched-tools.ts`. Test a scanning change in
 `test/bash-blocks.test.mjs`, and test a tool-specific change through `applyToolCallPolicy` in
 `test/harness.mjs` or `test/js-guard.test.mjs`. The README documents the per-tool behavior.
+
+## Platform-specific behavior
+
+Windows finds and stops processes differently, and it reaches the shell through Git Bash. Keep the
+primitives that cross that boundary (`findTgrep`, `spawnableCandidates`, `toWindowsPath`,
+`isTgrepProcess`, `stopServer`) tested in `test/binary-discovery.test.mjs`, which runs on every
+platform, and use `test/platform.mjs` for the platform's PATH lister (`where.exe` vs `which`) and
+shell instead of hard-coding them. Never hand `spawn` a path from `which` on Windows without probing
+it, and never signal a pid that was not verified — tgrep has no stop command, so a wrong pid kills a
+stranger's process.
+
+CI runs the whole suite on `windows-latest` with a release tgrep on `PATH` (see
+`.github/workflows/ci.yml`); the macOS job keeps using Homebrew.

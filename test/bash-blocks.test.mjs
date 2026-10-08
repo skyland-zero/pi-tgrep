@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { applyBashPolicy } from "../src/bash-policy.ts";
 
 async function policyCase(command, mode, expect, context) {
@@ -303,15 +304,18 @@ async function runCdTrackingTests() {
     },
   };
   // Each grep resolves the index for the directory it actually runs in, wherever the cd is.
+  // A relative cd target is resolved with the host's own rules, so the last directory comes from
+  // path.resolve rather than a POSIX literal (on Windows `/one` + `../two` is not `/two`).
+  const relativeTarget = path.resolve("/one", "../two");
   const r = await policyCase("grep -rn a src\ncd /one\ngrep -rn b src\ncd ../two\ngrep -rn c src", "translate", {
     action: "rewrite",
     command:
       "tgrep search --index-path '/base/.tgrep' -n a src\ncd /one\n" +
       "tgrep search --index-path '/one/.tgrep' -n b src\ncd ../two\n" +
-      "tgrep search --index-path '/two/.tgrep' -n c src",
+      `tgrep search --index-path '${relativeTarget}/.tgrep' -n c src`,
   }, resolver);
   assert.equal(r.action, "rewrite");
-  assert.deepEqual(calls, ["/base", "/one", "/two"]);
+  assert.deepEqual(calls, ["/base", "/one", relativeTarget]);
   // After a cd whose target is dynamic, later greps run verbatim (the index is unknowable) until an absolute cd.
   await policyCase('cd "$D"\ngrep -rn a src', "translate", { action: "allow" }, resolver);
   await policyCase('cd "$D"\ncd /abs\ngrep -rn a src', "translate", {

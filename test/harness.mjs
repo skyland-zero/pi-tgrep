@@ -10,6 +10,7 @@ import { loadConfig } from "../src/config.ts";
 import { buildTgrepArgs, createGrepToolOverride } from "../src/grep-tool.ts";
 import { repoRoot, ServerManager } from "../src/server-manager.ts";
 import { status, stopServer } from "../src/tgrep-client.ts";
+import { SHELL } from "./platform.mjs";
 
 const execFileP = promisify(execFile);
 
@@ -161,7 +162,7 @@ async function runRedirectExecTest() {
   let stdout = "";
   let stderr = "";
   try {
-    const res = await execFileP("bash", ["-c", result.command], { cwd: dir, encoding: "utf8" });
+    const res = await execFileP(SHELL, ["-c", result.command], { cwd: dir, encoding: "utf8" });
     stdout = res.stdout;
     stderr = res.stderr;
   } catch (err) {
@@ -185,7 +186,7 @@ async function runBackslashPatternExecTest() {
   assert.equal(result.command, String.raw`tgrep search --index-path '${indexPath}' -n '\bfoo\b' .`);
   let stdout = "";
   try {
-    ({ stdout } = await execFileP("bash", ["-c", result.command], { cwd: dir, encoding: "utf8" }));
+    ({ stdout } = await execFileP(SHELL, ["-c", result.command], { cwd: dir, encoding: "utf8" }));
   } catch (err) {
     stdout = err.stdout ?? "";
   }

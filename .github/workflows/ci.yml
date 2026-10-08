@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-and-test:
-    # tgrep only ships via Homebrew today (see README), so we run on a runner
+    # tgrep only ships via Homebrew today on macOS (see README), so we run on a runner
     # that has it preinstalled rather than trying to bootstrap it on Linux.
     runs-on: macos-latest
 
@@ -27,6 +27,43 @@ jobs:
 
       - name: Install tgrep
         run: brew install tgrep
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+  windows:
+    # The extension runs on Windows through Git Bash, where binary discovery, pid checks and shell
+    # paths differ; the suite exercises those against a real tgrep so they cannot regress silently.
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install tgrep
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod https://api.github.com/repos/microsoft/tgrep/releases/latest
+          $asset = $release.assets | Where-Object { $_.name -like '*x86_64-pc-windows-msvc.zip' } | Select-Object -First 1
+          if (-not $asset) { throw "no x86_64-pc-windows-msvc asset in $($release.tag_name)" }
+          Invoke-WebRequest $asset.browser_download_url -OutFile tgrep.zip
+          Expand-Archive tgrep.zip -DestinationPath "$env:RUNNER_TEMP\tgrep" -Force
+          $exe = Get-ChildItem "$env:RUNNER_TEMP\tgrep" -Recurse -Filter tgrep.exe | Select-Object -First 1
+          if (-not $exe) { throw "tgrep.exe missing from $($asset.name)" }
+          $exe.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & $exe.FullName --version
 
       - name: Typecheck
         run: npm run typecheck

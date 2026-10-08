@@ -10,6 +10,29 @@ pi-tgrep — what changed for them, not how it was implemented internally.
 
 ## [Unreleased]
 
+### Added
+
+- `PI_TGREP_BIN` sets the tgrep executable to use, for installs the `PATH` search cannot resolve
+  (a renamed release binary, a download outside `PATH`). The value is probed with `tgrep --version`;
+  one that does not run leaves the extension dormant rather than silently using another binary.
+
+### Fixed
+
+- Windows: tgrep is discovered with `where.exe` and every candidate is probed before use, so a
+  listing Node cannot spawn (Git Bash drive paths such as `/c/Users/...`, the `.exe` suffix Git Bash
+  strips, `.cmd`/`.bat` shims) no longer sends every search to the ripgrep fallback.
+- Windows: starting the server no longer crashes the host when the binary cannot be spawned; the
+  failure is reported in the session instead, and the readiness wait stops instead of polling for
+  ten seconds.
+- Windows: `/tgrep-stop` verifies the recorded pid with `tasklist` instead of the Git Bash `ps`,
+  which rejects `-o`. It now stops the daemon instead of reporting "no server running" and leaving
+  the server running untracked.
+- Windows: a missing binary no longer offers a `brew install` that cannot work; it explains where to
+  get tgrep instead, once.
+- A daemon that fails to start is surfaced as a warning instead of leaving the footer at
+  "tgrep: no index".
+- No console window flashes for searches or for the spawned server on Windows.
+
 ## [0.4.0] - 2026-10-01
 
 ### Changed

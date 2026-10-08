@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { applyBashPolicy } from "../src/bash-policy.ts";
+import { LIST_BINARY, SHELL } from "./platform.mjs";
 
 const execFileP = promisify(execFile);
 const IDX = { indexPath: "/repo/.tgrep" };
@@ -71,7 +72,7 @@ async function runQuotedTokensStayQuotedTests() {
 async function runShellGlobExpansionExecTest() {
   let hasTgrep = true;
   try {
-    await execFileP("which", ["tgrep"]);
+    await execFileP(LIST_BINARY, ["tgrep"]);
   } catch {
     hasTgrep = false;
   }
@@ -87,7 +88,7 @@ async function runShellGlobExpansionExecTest() {
     const result = await applyBashPolicy("grep -n needle src/*.ts", "translate");
     assert.equal(result.action, "rewrite");
     assert.equal(result.command, "tgrep search -n needle src/*.ts");
-    const { stdout } = await execFileP("/bin/sh", ["-c", result.command], { cwd: dir, encoding: "utf8" });
+    const { stdout } = await execFileP(SHELL, ["-c", result.command], { cwd: dir, encoding: "utf8" });
     assert.match(stdout, /src\/a\.ts:1:/, `expected a.ts match, got: ${stdout}`);
     assert.match(stdout, /src\/b\.ts:1:/, `expected b.ts match, got: ${stdout}`);
   } finally {
